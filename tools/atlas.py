@@ -2,15 +2,15 @@
 #
 #   blender -b -P tools/atlas.py -- <사진 폴더> textures.jpg
 #
-# 사진: Poly Haven (polyhaven.com) CC0 텍스처의 Diffuse 1K. 순서 = 게임의 재질 번호(SURF, index.html).
+# 사진: ambientCG (ambientcg.com) CC0 텍스처의 1K-JPG 묶음에서 *_Color.jpg 를 <ID>.jpg 로 둔 것. 순서 = 게임의 재질 번호(SURF, index.html).
 # 마지막 줄에 칸별 평균색(sRGB 0..1)을 출력한다 → index.html 의 SURF_AVG 에 붙여 넣는다.
 
 import bpy, sys, os
 
-NAMES = ['painted_plaster_wall', 'concrete', 'corrugated_iron', 'rusty_metal',
-         'metal_plate', 'brown_planks_03', 'red_brick', 'clay_roof_tiles',
-         'asphalt_02', 'leafy_grass', 'cliff_side', 'bark_brown_02',
-         'forest_leaves_02', 'brick_floor', 'aerial_rocks_02', 'concrete_block_wall']
+NAMES = ['PaintedPlaster017', 'Concrete034', 'CorrugatedSteel005', 'Metal021',
+         'MetalPlates006', 'Planks037A', 'Bricks085', 'RoofingTiles006',
+         'Asphalt031', 'Grass004', 'Rock053', 'Bark012',
+         'ScatteredLeaves009', 'PavingStones128', 'Ground085', 'Bricks113A']
 TILE, N = 512, 4
 
 src, out = sys.argv[sys.argv.index('--') + 1:][:2]

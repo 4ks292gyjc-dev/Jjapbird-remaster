@@ -10,6 +10,7 @@
   - 창(일시정지·클리어·기록): 따뜻한 종이색 패널, 굵은 제목
 - **고화질 그래픽 설정**(일시정지 > 설정): 해상도 2배까지·그림자 2배. 데스크탑 기본 켬, 폰·패드 기본 끔
 - 데스크탑·폰·패드(세로·가로) 모든 화면에서 메뉴 버튼이 첫 화면에 들어오도록 정리
+- 재질 사진 16장을 [ambientCG](https://ambientcg.com) CC0 텍스처로 교체 (목록: `tools/atlas.py`)
 
 ## 디자인 시안
 Figma: https://www.figma.com/design/IfEzyMoFZXrzNvDfmRx7li
