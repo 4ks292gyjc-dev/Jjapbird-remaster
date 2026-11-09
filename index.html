@@ -996,34 +996,59 @@ addPhoto(VERTEX_MAT, null);
 // (합친 정적 메시는 이미 월드 좌표라 같은 식으로 그대로 맞는다)
 function addPhoto(m, surf) {
   m.onBeforeCompile = (sh) => {
-    sh.uniforms.uAtlas = PHOTO.atlas; sh.uniforms.uInvSize = PHOTO.invSize; sh.uniforms.uAvg = PHOTO.avg;
+    sh.uniforms.uAtlas = PHOTO.atlas; sh.uniforms.uNrm = PHOTO.nrm; sh.uniforms.uOrm = PHOTO.orm;
+    sh.uniforms.uInvSize = PHOTO.invSize; sh.uniforms.uAvg = PHOTO.avg;
     const decl = surf == null ? 'attribute float surf;' : `const float surf = ${surf.toFixed(1)};`;
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', `#include <common>\n${decl}\nflat varying float vSurf;\nvarying vec3 vPPos;`)
+      .replace('#include <common>', `#include <common>\n${decl}\nflat varying float vSurf;\nvarying vec3 vPPos;\nflat varying vec3 vAxX, vAxY, vAxZ;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
 vSurf = surf;
+// 투영 좌표축을 시점 공간으로 (노멀 맵을 시점 공간 법선으로 바꿀 때 씀)
+vAxX = normalize(mat3(modelViewMatrix) * vec3(1.0, 0.0, 0.0));
+vAxY = normalize(mat3(modelViewMatrix) * vec3(0.0, 1.0, 0.0));
+vAxZ = normalize(mat3(modelViewMatrix) * vec3(0.0, 0.0, 1.0));
 vPPos = position * vec3(length(modelMatrix[0].xyz), length(modelMatrix[1].xyz), length(modelMatrix[2].xyz));`);
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', `#include <common>
-uniform sampler2D uAtlas; uniform float uInvSize[16]; uniform vec3 uAvg[16];
-flat varying float vSurf; varying vec3 vPPos;
-// 아틀라스 한 칸(id)에서 반복 무늬 읽기. 칸 경계 번짐을 막으려 안쪽 98% 만 쓰고, 밉맵은 반복 전 좌표의 기울기로 고른다
-vec3 atlasTap(int id, vec2 uv) {
-  vec2 cell = vec2(float(id % 4), float(3 - id / 4));
-  vec2 a = (cell + 0.01 + fract(uv) * 0.98) * 0.25;
-  return textureGrad(uAtlas, a, dFdx(uv) * 0.245, dFdy(uv) * 0.245).rgb;
+uniform sampler2D uAtlas, uNrm, uOrm; uniform float uInvSize[32]; uniform vec3 uAvg[32];
+flat varying float vSurf; varying vec3 vPPos; flat varying vec3 vAxX, vAxY, vAxZ;
+// 아틀라스(8×4) 한 칸(id)에서 반복 무늬 읽기. 칸 경계 번짐을 막으려 안쪽 98% 만 쓰고, 밉맵은 반복 전 좌표의 기울기로 고른다
+vec3 atlasTap(sampler2D t, int id, vec2 uv) {
+  vec2 cell = vec2(float(id % 8), float(3 - id / 8));
+  vec2 k = vec2(0.125, 0.25);
+  vec2 a = (cell + 0.01 + fract(uv) * 0.98) * k;
+  return textureGrad(t, a, dFdx(uv) * k * 0.98, dFdy(uv) * k * 0.98).rgb;
 }`)
       .replace('#include <color_fragment>', `#include <color_fragment>
-if (vSurf > -0.5) {
+bool tpOn = vSurf > -0.5;
+vec3 tpNrm = vec3(0.0), tpOrm = vec3(1.0);
+if (tpOn) {
   int s = int(vSurf + 0.5);
-  bool keepColor = s >= 16;
-  int id = keepColor ? s - 16 : s;
-  vec3 n = abs(normalize(cross(dFdx(vPPos), dFdy(vPPos))));
+  bool keepColor = s >= 32;
+  int id = keepColor ? s - 32 : s;
+  vec3 nS = normalize(cross(dFdx(vPPos), dFdy(vPPos)));   // 면의 바깥 법선 (투영 좌표 공간)
+  vec3 n = abs(nS), sg = sign(nS + 1e-5);
   vec3 w = pow(n, vec3(4.0)); w /= w.x + w.y + w.z;
   vec3 p = vPPos * uInvSize[id];
-  vec3 t = atlasTap(id, p.zy) * w.x + atlasTap(id, p.xz) * w.y + atlasTap(id, p.xy) * w.z;
+  // 세 방향 투영 (뒷면 투영은 좌우를 뒤집어 무늬·요철 방향을 맞춘다)
+  vec2 uX = vec2(p.z * sg.x, p.y), uY = vec2(p.x * sg.y, p.z), uZ = vec2(-p.x * sg.z, p.y);
+  vec3 t = atlasTap(uAtlas, id, uX) * w.x + atlasTap(uAtlas, id, uY) * w.y + atlasTap(uAtlas, id, uZ) * w.z;
+  tpOrm = atlasTap(uOrm, id, uX) * w.x + atlasTap(uOrm, id, uY) * w.y + atlasTap(uOrm, id, uZ) * w.z;
   diffuseColor.rgb = keepColor ? diffuseColor.rgb * t / uAvg[id] : t;
-}`);
+  diffuseColor.rgb *= mix(1.0, tpOrm.r, 0.75);   // AO: 틈·홈을 어둡게
+  // 노멀 맵: 세 방향 각각 whiteout 섞기 (Ben Golus 방식) → 투영 좌표 공간 법선 → 시점 공간
+  vec3 tX = atlasTap(uNrm, id, uX) * 2.0 - 1.0, tY = atlasTap(uNrm, id, uY) * 2.0 - 1.0, tZ = atlasTap(uNrm, id, uZ) * 2.0 - 1.0;
+  tX.x *= sg.x; tY.x *= sg.y; tZ.x *= -sg.z;
+  tX = vec3(tX.xy + nS.zy, n.x * tX.z); tY = vec3(tY.xy + nS.xz, n.y * tY.z); tZ = vec3(tZ.xy + nS.xy, n.z * tZ.z);
+  vec3 N = normalize(tX.zyx * w.x + tY.xzy * w.y + tZ.xyz * w.z);
+  tpNrm = normalize(vAxX * N.x + vAxY * N.y + vAxZ * N.z);
+}`)
+      .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+if (tpOn) roughnessFactor = clamp(tpOrm.g, 0.08, 1.0);`)
+      .replace('#include <metalnessmap_fragment>', `#include <metalnessmap_fragment>
+if (tpOn) metalnessFactor = max(metalnessFactor, tpOrm.b);`)
+      .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+if (tpOn) normal = tpNrm;`);
   };
   m.customProgramCacheKey = () => 'photo:' + surf;   // 재질마다 셰이더 코드가 달라서 따로 캐시
 }
@@ -1041,36 +1066,39 @@ function photoMat(color, surf) {
 }
 
 // ── 실사 재질 ──
-// 실제 사진 재질 16장(ambientCG CC0, 1K Color 맵)을 4×4 로 묶은 textures.jpg (tools/atlas.py).
+// 실사 재질 32가지(ambientCG CC0, 1K)를 8×4 로 묶은 아틀라스 3장 (tools/atlas.py):
+//   textures.jpg = 색, textures_n.jpg = 노멀(요철), textures_orm.jpg = AO·거칠기·금속
 // 모델에 UV 가 없어서 세 방향에서 투영(triplanar)해 입힌다. 합쳐진 정적 메시(VERTEX_MAT)에만 적용.
-// surf 값: -1 = 사진 없음, 0..15 = 사진 그대로, 16..31 = 사진 무늬만 쓰고 원래 색 유지(D)
-const D = (n) => n + 16;
+// surf 값: -1 = 사진 없음, 0..31 = 사진 그대로, 32..63 = 사진 무늬만 쓰고 원래 색 유지(D)
+const D = (n) => n + 32;
 //                 회반죽 콘크리트 함석 녹슨철 무늬철판 판자 벽돌 기와 아스팔트 잔디 절벽 나무껍질 낙엽 벽돌바닥 이끼바위 블록
-const SURF_SIZE = [3,     3,      2.5, 2,     1.5,    2,   2,   2.5, 5,      4,   6,   1.5,    3,   3,     5,     3];   // 사진 한 장이 덮는 미터
-const SURF_AVG = [[0.745, 0.747, 0.733], [0.723, 0.723, 0.723], [0.602, 0.607, 0.619], [0.359, 0.379, 0.4], [0.272, 0.286, 0.29], [0.313, 0.241, 0.18], [0.586, 0.458, 0.389], [0.462, 0.272, 0.18], [0.471, 0.471, 0.471], [0.378, 0.426, 0.19], [0.402, 0.362, 0.266], [0.541, 0.475, 0.316], [0.568, 0.429, 0.226], [0.627, 0.607, 0.556], [0.481, 0.386, 0.277], [0.498, 0.455, 0.386]];   // 칸별 평균색(sRGB), atlas.py 출력
+const SURF_SIZE = [3,     3,      2.5, 2,     1.5,    2,   2,   2.5, 5,      4,   6,   1.5,    3,   3,     5,     3,
+//                 녹슨골함석 도장철 철망 도로 우주암석 풀흙 갑판 천 콘크리트4종           타일 철판 초가 갈라진아스팔트
+                   2.5,      2,    1.5, 6,   6,      4,   2,   1.5, 3, 3, 4, 4,          1.5, 2,   2,   5];   // 사진 한 장이 덮는 미터
+const SURF_AVG = [[0.745, 0.749, 0.733], [0.722, 0.722, 0.722], [0.6, 0.608, 0.62], [0.361, 0.38, 0.4], [0.271, 0.286, 0.29], [0.314, 0.243, 0.18], [0.584, 0.459, 0.388], [0.463, 0.271, 0.18], [0.471, 0.471, 0.471], [0.376, 0.427, 0.188], [0.404, 0.361, 0.267], [0.541, 0.475, 0.318], [0.569, 0.427, 0.227], [0.627, 0.608, 0.557], [0.482, 0.384, 0.278], [0.498, 0.455, 0.384], [0.494, 0.667, 0.718], [0.969, 0.239, 0.235], [0.486, 0.341, 0.251], [0.31, 0.31, 0.302], [0.063, 0.102, 0.114], [0.596, 0.576, 0.341], [0.4, 0.275, 0.145], [0.357, 0.357, 0.357], [0.804, 0.808, 0.725], [0.569, 0.529, 0.451], [0.635, 0.596, 0.529], [0.478, 0.435, 0.388], [0.827, 0.792, 0.761], [0.737, 0.729, 0.725], [0.431, 0.384, 0.329], [0.337, 0.322, 0.282]];   // 칸별 평균색(sRGB), atlas.py 출력
 // 모델 재질 이름 → surf. 에셋별 표가 먼저, 없으면 재질 이름 표
 const SURF_BY_ASSET = {
   house_body: { tint: 6, tintdark: D(15), tintlight: D(1) }, house_roof: { tint: D(7), tintdark: D(7) },
-  rock: { tint: 10, tintdark: 10, tintlight: 10 }, asteroid: { tint: D(10), tintdark: D(10), tintlight: D(10) },
-  container: { tint: D(2), tintdark: D(2) }, railcar: { tint: D(2), tintdark: D(2) }, mover: { tint: D(4), tintdark: D(4) },
+  rock: { tint: 10, tintdark: 10, tintlight: 10 }, asteroid: { tint: D(20), tintdark: D(20), tintlight: D(20) },
+  container: { tint: D(16), tintdark: D(16) }, railcar: { tint: D(2), tintdark: D(2) }, mover: { tint: D(4), tintdark: D(4) },
   tree: { tint: D(12), tintdark: D(12), tintlight: D(12) }, foliage: { tint: D(12), tintdark: D(12), tintlight: D(12) },
-  island: { tint: 9, tintdark: 9 }, boat: { tint: D(5), tintdark: D(5) },
-  pipe: { tint: D(3), tintdark: D(4) }, girder: { tint: D(3), tintdark: D(3) }, gate_frame: { tint: D(3) },
-  crane_mast: { tint: D(3) }, crane_jib: { tint: D(3) }, trunk: { wood: 11, twigDark: 11 },
-  checkpoint_pad: { tint: D(13), tintlight: D(13), tintdark: D(15) }, road: { tint: 8, tintlight: D(1) },
-  stairs: { tint: D(1), tintdark: D(1), tintlight: D(1) }, slab: { tint: D(1), tintdark: D(1), tintlight: D(1) },
+  island: { tint: 9, tintdark: 21 }, boat: { tint: D(22), tintdark: D(22) },
+  pipe: { tint: D(3), tintdark: D(29) }, girder: { tint: D(18), tintdark: D(18) }, gate_frame: { tint: D(17) },
+  crane_mast: { tint: D(17) }, crane_jib: { tint: D(17) }, trunk: { wood: 11, twigDark: 11 },
+  checkpoint_pad: { tint: D(13), tintlight: D(13), tintdark: D(15) }, road: { tint: 19, tintlight: D(1) },
+  stairs: { tint: D(24), tintdark: D(24), tintlight: D(24) }, slab: { tint: D(25), tintdark: D(25), tintlight: D(25) },
   wall_panel: { tint: D(15), tintdark: D(15), tintlight: D(15) },
-  building_low: { tint: D(1), tintdark: D(1), tintlight: D(1) }, building_tall: { tint: D(1), tintdark: D(1), tintlight: D(1) },
-  tower_floor: { tint: D(1), tintlight: D(1), tintdark: D(1) },
-  blade_fan: { tint: D(4) }, blade_sail: { tint: D(5) },
+  building_low: { tint: D(26), tintdark: D(26), tintlight: D(26) }, building_tall: { tint: D(27), tintdark: D(27), tintlight: D(27) },
+  tower_floor: { tint: D(28), tintlight: D(28), tintdark: D(28) },
+  blade_fan: { tint: D(4) }, blade_sail: { tint: D(23) },
 };
 const PHOTO = {   // 사진 재질 셰이더가 함께 쓰는 값 (아틀라스는 loadAssets 에서 채운다)
-  atlas: { value: null },
+  atlas: { value: null }, nrm: { value: null }, orm: { value: null },
   invSize: { value: SURF_SIZE.map((m) => 1 / m) },
   avg: { value: SURF_AVG.map(([r, g, b]) => { const c = new THREE.Color().setRGB(r, g, b, THREE.SRGBColorSpace); return new THREE.Vector3(c.r, c.g, c.b); }) },
 };
 const SURF_BY_MAT = { wood: 5, woodLight: 5, twig: 11, twigDark: 11, stone: D(15), brick: 6, steel: D(4), steelDark: D(4),
-  dirt: 10, straw: 9, trim: D(1), roofRed: D(7) };
+  dirt: 10, straw: 30, trim: D(1), roofRed: D(7) };
 
 // 블렌더로 만든 코스 모델 (tools/assets.py → 맨 아래 #assets-glb). 이름 → 원본 Object3D
 // 재질 이름이 tint / tintdark / tintlight 인 부분은 붙일 때 고른 색(그대로·어둡게·밝게)으로 칠하고,
@@ -1094,10 +1122,11 @@ async function loadAssets() {
     ASSETS.set(o.name, o);
   }
   // 실사 재질 사진: 게임을 만들기 전에 받아 둔다 (늦게 오면 그 사이 사진 칸이 검게 보임)
-  const tex = await new THREE.TextureLoader().loadAsync('textures.jpg');
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 8;
-  PHOTO.atlas.value = tex;
+  const L = new THREE.TextureLoader();
+  const [tex, nrm, orm] = await Promise.all(['textures.jpg', 'textures_n.jpg', 'textures_orm.jpg'].map((f) => L.loadAsync(f)));
+  tex.colorSpace = THREE.SRGBColorSpace;   // 노멀·ORM 은 색이 아니라 값이라 색 공간 변환 없이
+  for (const t of [tex, nrm, orm]) t.anisotropy = 16;
+  PHOTO.atlas.value = tex; PHOTO.nrm.value = nrm; PHOTO.orm.value = orm;
 }
 
 // 구간별 팔레트
@@ -1383,7 +1412,7 @@ class Level {
   _buildGround() {
     const g = new THREE.Group();
     this.root.add(g);
-    this.box(g, 340, 6, 340, 0x6f6a63, 0, -3, 0).userData.surf = D(8);   // 지면 (윗면 y=0), 아스팔트 무늬
+    this.box(g, 340, 6, 340, 0x6f6a63, 0, -3, 0).userData.surf = D(31);   // 지면 (윗면 y=0), 갈라진 아스팔트
     this.colliders[this.colliders.length - 1].floor = true;     // 맨 밑 바닥: 닿으면 체크포인트로 복귀
     // 깨진 도로 판
     for (let i = 0; i < 26; i++) {
@@ -2534,7 +2563,7 @@ class UI {
     $('set-volume').value = s.volume;
     $('set-stamina').checked = s.stamina;
     $('set-voice').checked = s.voice ?? true;
-    $('set-hq').checked = s.hq ?? !IS_TOUCH;
+    $('set-hq').checked = s.hq ?? true;
     this._renderSettings();
   }
 
@@ -4098,7 +4127,7 @@ class Game {
     POSE.TILT_SENSITIVITY = s.tilt;
     CONFIG.STAMINA_ENABLED = s.stamina;   // 끄면 무한 체력(연습 모드)
     // 고화질: 픽셀 비율 2배까지, 그림자 지도 2배 (기본값은 데스크탑 켬, 폰·패드 끔). 느리면 _adaptResolution 이 다시 낮춘다
-    const hq = s.hq ?? !IS_TOUCH;
+    const hq = s.hq ?? true;   // 모든 기기 기본 고화질
     if (this.renderer && this._hq !== hq) {
       this._hq = hq;
       this.renderer.setPixelRatio(Math.min(devicePixelRatio, hq ? 2 : (IS_TOUCH ? 1 : 1.5)));
