@@ -998,16 +998,21 @@ function addPhoto(m, surf) {
   m.onBeforeCompile = (sh) => {
     sh.uniforms.uAtlas = PHOTO.atlas; sh.uniforms.uNrm = PHOTO.nrm; sh.uniforms.uOrm = PHOTO.orm;
     sh.uniforms.uInvSize = PHOTO.invSize; sh.uniforms.uAvg = PHOTO.avg;
-    const decl = surf == null ? 'attribute float surf;' : `const float surf = ${surf.toFixed(1)};`;
+    const merged = surf == null;   // 합친 정적 메시: 정점마다 surf·원래 물체 좌표(lpos)·회전(lrot)
+    const decl = merged ? 'attribute float surf;\nattribute vec3 lpos;\nattribute vec4 lrot;' : `const float surf = ${surf.toFixed(1)};`;
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', `#include <common>\n${decl}\nflat varying float vSurf;\nvarying vec3 vPPos;\nflat varying vec3 vAxX, vAxY, vAxZ;`)
+      .replace('#include <common>', `#include <common>\n${decl}\nflat varying float vSurf;\nvarying vec3 vPPos;\nflat varying vec3 vAxX, vAxY, vAxZ;
+vec3 qrot(vec4 q, vec3 v) { return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v); }`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
 vSurf = surf;
-// 투영 좌표축을 시점 공간으로 (노멀 맵을 시점 공간 법선으로 바꿀 때 씀)
+// 투영은 물체 자신의 축 기준 (돌려 놓은 벽·발판에도 무늬가 물체를 따라간다). 축은 시점 공간으로 넘겨 노멀 변환에 쓴다
+${merged ? `vPPos = lpos;
+vAxX = normalize(mat3(modelViewMatrix) * qrot(lrot, vec3(1.0, 0.0, 0.0)));
+vAxY = normalize(mat3(modelViewMatrix) * qrot(lrot, vec3(0.0, 1.0, 0.0)));
+vAxZ = normalize(mat3(modelViewMatrix) * qrot(lrot, vec3(0.0, 0.0, 1.0)));` : `vPPos = position * vec3(length(modelMatrix[0].xyz), length(modelMatrix[1].xyz), length(modelMatrix[2].xyz));
 vAxX = normalize(mat3(modelViewMatrix) * vec3(1.0, 0.0, 0.0));
 vAxY = normalize(mat3(modelViewMatrix) * vec3(0.0, 1.0, 0.0));
-vAxZ = normalize(mat3(modelViewMatrix) * vec3(0.0, 0.0, 1.0));
-vPPos = position * vec3(length(modelMatrix[0].xyz), length(modelMatrix[1].xyz), length(modelMatrix[2].xyz));`);
+vAxZ = normalize(mat3(modelViewMatrix) * vec3(0.0, 0.0, 1.0));`}`);
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', `#include <common>
 uniform sampler2D uAtlas, uNrm, uOrm; uniform float uInvSize[32]; uniform vec3 uAvg[32];
@@ -1026,21 +1031,18 @@ if (tpOn) {
   int s = int(vSurf + 0.5);
   bool keepColor = s >= 32;
   int id = keepColor ? s - 32 : s;
-  vec3 nS = normalize(cross(dFdx(vPPos), dFdy(vPPos)));   // 면의 바깥 법선 (투영 좌표 공간)
-  vec3 n = abs(nS), sg = sign(nS + 1e-5);
-  vec3 w = pow(n, vec3(4.0)); w /= w.x + w.y + w.z;
-  vec3 p = vPPos * uInvSize[id];
-  // 세 방향 투영 (뒷면 투영은 좌우를 뒤집어 무늬·요철 방향을 맞춘다)
-  vec2 uX = vec2(p.z * sg.x, p.y), uY = vec2(p.x * sg.y, p.z), uZ = vec2(-p.x * sg.z, p.y);
-  vec3 t = atlasTap(uAtlas, id, uX) * w.x + atlasTap(uAtlas, id, uY) * w.y + atlasTap(uAtlas, id, uZ) * w.z;
-  tpOrm = atlasTap(uOrm, id, uX) * w.x + atlasTap(uOrm, id, uY) * w.y + atlasTap(uOrm, id, uZ) * w.z;
+  vec3 nS = normalize(cross(dFdx(vPPos), dFdy(vPPos)));   // 면의 바깥 법선 (물체 좌표)
+  // 면마다 한 방향으로만 투영 (섞지 않아 무늬가 겹쳐 깨지지 않는다):
+  // 벽·비탈은 가로=수평, 세로=위쪽(벽돌·판자가 똑바로), 거의 수평인 바닥·천장은 물체의 X 축을 따라
+  vec3 T = abs(nS.y) > 0.97 ? normalize(vec3(1.0, 0.0, 0.0) - nS * nS.x) : normalize(cross(vec3(0.0, 1.0, 0.0), nS));
+  vec3 B = cross(nS, T);
+  vec2 uv = vec2(dot(vPPos, T), dot(vPPos, B)) * uInvSize[id];
+  vec3 t = atlasTap(uAtlas, id, uv);
+  tpOrm = atlasTap(uOrm, id, uv);
   diffuseColor.rgb = keepColor ? diffuseColor.rgb * t / uAvg[id] : t;
   diffuseColor.rgb *= mix(1.0, tpOrm.r, 0.75);   // AO: 틈·홈을 어둡게
-  // 노멀 맵: 세 방향 각각 whiteout 섞기 (Ben Golus 방식) → 투영 좌표 공간 법선 → 시점 공간
-  vec3 tX = atlasTap(uNrm, id, uX) * 2.0 - 1.0, tY = atlasTap(uNrm, id, uY) * 2.0 - 1.0, tZ = atlasTap(uNrm, id, uZ) * 2.0 - 1.0;
-  tX.x *= sg.x; tY.x *= sg.y; tZ.x *= -sg.z;
-  tX = vec3(tX.xy + nS.zy, n.x * tX.z); tY = vec3(tY.xy + nS.xz, n.y * tY.z); tZ = vec3(tZ.xy + nS.xy, n.z * tZ.z);
-  vec3 N = normalize(tX.zyx * w.x + tY.xzy * w.y + tZ.xyz * w.z);
+  vec3 tn = atlasTap(uNrm, id, uv) * 2.0 - 1.0;   // 노멀 맵(OpenGL): 면의 접선 공간 → 물체 좌표 → 시점 공간
+  vec3 N = normalize(T * tn.x + B * tn.y + nS * tn.z);
   tpNrm = normalize(vAxX * N.x + vAxY * N.y + vAxZ * N.z);
 }`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
@@ -1068,7 +1070,7 @@ function photoMat(color, surf) {
 // ── 실사 재질 ──
 // 실사 재질 32가지(ambientCG CC0, 1K)를 8×4 로 묶은 아틀라스 3장 (tools/atlas.py):
 //   textures.jpg = 색, textures_n.jpg = 노멀(요철), textures_orm.jpg = AO·거칠기·금속
-// 모델에 UV 가 없어서 세 방향에서 투영(triplanar)해 입힌다. 합쳐진 정적 메시(VERTEX_MAT)에만 적용.
+// 모델에 UV 가 없어서 면마다 그 면 방향으로 투영해 입힌다 (물체 자신의 축 기준, 섞지 않음).
 // surf 값: -1 = 사진 없음, 0..31 = 사진 그대로, 32..63 = 사진 무늬만 쓰고 원래 색 유지(D)
 const D = (n) => n + 32;
 //                 회반죽 콘크리트 함석 녹슨철 무늬철판 판자 벽돌 기와 아스팔트 잔디 절벽 나무껍질 낙엽 벽돌바닥 이끼바위 블록
@@ -1200,6 +1202,16 @@ class Level {
           for (let i = 0; i < col.length; i += 3) { col[i] = c.r; col[i + 1] = c.g; col[i + 2] = c.b; }
           g.setAttribute('color', new THREE.BufferAttribute(col, 3));
           g.setAttribute('surf', new THREE.BufferAttribute(new Float32Array(pos.count).fill(m.userData.surf ?? -1), 1));
+          // 사진 무늬 투영용: 원래 물체 기준 좌표(크기 반영)와 월드 회전
+          const ws = new THREE.Vector3(), wq = new THREE.Quaternion();
+          m.matrixWorld.decompose(new THREE.Vector3(), wq, ws);
+          const lp = new Float32Array(pos.count * 3), lr = new Float32Array(pos.count * 4);
+          for (let i = 0; i < pos.count; i++) {
+            lp[i * 3] = pos.getX(i) * ws.x; lp[i * 3 + 1] = pos.getY(i) * ws.y; lp[i * 3 + 2] = pos.getZ(i) * ws.z;
+            lr[i * 4] = wq.x; lr[i * 4 + 1] = wq.y; lr[i * 4 + 2] = wq.z; lr[i * 4 + 3] = wq.w;
+          }
+          g.setAttribute('lpos', new THREE.BufferAttribute(lp, 3));
+          g.setAttribute('lrot', new THREE.BufferAttribute(lr, 4));
         }
         g.applyMatrix4(m.matrixWorld);
         m.removeFromParent();
